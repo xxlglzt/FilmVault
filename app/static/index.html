@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>FilmVault · 我的影音库</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#141414">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar" id="topbar">
+  <a class="logo" href="#/">FILMVAULT</a>
+  <nav id="nav" aria-label="主导航">
+    <a href="#/" data-route="home">首页</a>
+    <a href="#/movies" data-route="movies">电影</a>
+    <a href="#/tv" data-route="tv">电视剧</a>
+    <a href="#/status/want" data-route="status">我的片单</a>
+  </nav>
+  <div class="top-actions">
+    <button class="icon-button" id="search-toggle" aria-label="搜索" title="搜索片库">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+    </button>
+    <button class="scan-button" onclick="openDirectoryPicker()">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z"></path><path d="M12 12v5m-2.5-2.5h5"></path></svg>
+      <span>扫描媒体库</span>
+    </button>
+    <div class="more-menu">
+      <button class="icon-button" id="more-toggle" aria-label="更多功能">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg>
+      </button>
+      <div class="dropdown" id="more-dropdown">
+        <a href="#/stats">观影统计</a>
+        <a href="#/add">手动添加</a>
+        <a href="#/settings">设置</a>
+      </div>
+    </div>
+  </div>
+</header>
+<div class="search-panel" id="search-panel">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+  <input id="global-q" placeholder="搜索片名、导演…" autocomplete="off">
+  <button id="search-close" aria-label="关闭">×</button>
+</div>
+<main id="app"></main>
+<div id="directory-root"></div>
+<div id="scan-root"></div>
+<div id="local-root"></div>
+<div id="player-root"></div>
+<div id="toast-root"></div>
+<script src="/app.js"></script>
+</body>
+</html>
