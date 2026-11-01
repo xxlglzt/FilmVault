@@ -28,6 +28,7 @@ class WorkMetadata:
     type: str                        # 'movie' | 'tv'
     title: str
     original_title: str = ""
+    search_alias: str = ""
     year: int | None = None
     region: str = ""
     genres: list[str] = field(default_factory=list)

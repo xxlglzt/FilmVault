@@ -379,6 +379,99 @@ async function saveEdit(id) {
   location.hash = `#/work/${id}`;
 }
 
+let fileCache = new Map();
+let assignSearchHits = [];
+
+function fileRowsHtml(items) {
+  return items.map(f => `<div class="file-row">
+    <div class="file-main"><div class="file-name" title="${esc(f.path)}">${esc(f.path.split(/[\\/]/).pop())}</div><div class="muted">识别词：${esc(f.parsed_title || '未提取')} ${f.year ? '· ' + f.year : ''}${f.episode ? ` · 第 ${f.season} 季第 ${f.episode} 集` : ''}</div></div>
+    <div class="file-match">${f.work_id ? `<a href="#/work/${f.work_id}">${esc(f.work_title)}</a><span class="muted">${f.work_year ?? ''} · ${TYPE_LABEL[f.work_type] || ''}</span>` : '<span class="muted">未识别</span>'}</div>
+    <div class="file-actions"><button class="btn small ghost" onclick="reidentifyFile(${f.id})">重新识别</button><button class="btn small" onclick="openAssignDialog(${f.id})">调整匹配</button></div>
+  </div>`).join('') || '<div class="empty">没有符合条件的文件</div>';
+}
+
+async function renderFiles() {
+  const data = await api('/api/files');
+  fileCache = new Map(data.items.map(f => [f.id, f]));
+  app.innerHTML = `<div class="page"><div class="list-header"><div><h1>文件管理</h1><p>检查识别结果、重新匹配或手动指定正确作品，播放进度会保留</p></div><div class="filters"><input id="file-q" placeholder="搜索文件名或当前作品"></div></div>
+    <div class="panel"><div class="file-list-head"><span>本地文件</span><span>当前匹配</span><span>操作</span></div><div id="file-list">${fileRowsHtml(data.items)}</div></div>
+  </div>`;
+  document.getElementById('file-q').oninput = e => {
+    const q = e.currentTarget.value.trim().toLowerCase();
+    const items = data.items.filter(f => !q || f.path.toLowerCase().includes(q) || (f.work_title || '').toLowerCase().includes(q));
+    document.getElementById('file-list').innerHTML = fileRowsHtml(items);
+  };
+}
+
+async function reidentifyFile(fileId) {
+  try {
+    const result = await api(`/api/files/${fileId}/reidentify`, { method: 'POST' });
+    flash(`已匹配为《${result.work_title}》`);
+    renderFiles();
+  } catch (e) { flash(e.message, true); }
+}
+
+function openAssignDialog(fileId) {
+  const f = fileCache.get(fileId);
+  if (!f) return;
+  const type = f.season != null ? 'tv' : 'movie';
+  directoryRoot.innerHTML = `<div class="modal-mask" id="directory-mask"><div class="modal assign-modal">
+    <div class="modal-header"><div><h2>调整文件匹配</h2><p class="muted" style="margin-top:5px">${esc(f.path.split(/[\\/]/).pop())}</p></div><button class="modal-close" onclick="closeDirectoryPicker()">×</button></div>
+    <div class="modal-body"><div class="assign-form"><input id="assign-q" value="${esc(f.parsed_title)}" placeholder="输入正确片名"><select id="assign-source"><option value="douban">豆瓣</option><option value="tmdb">TMDB</option></select><select id="assign-type"><option value="movie" ${type === 'movie' ? 'selected' : ''}>电影</option><option value="tv" ${type === 'tv' ? 'selected' : ''}>电视剧</option></select><button class="btn" onclick="searchAssign(${fileId})">搜索</button></div>
+      <div class="assign-season"><label>年份 <input id="assign-year" type="number" value="${f.year ?? ''}"></label><label>季 <input id="assign-season" type="number" min="1" value="${f.season ?? ''}"></label><label>集 <input id="assign-episode" type="number" min="1" value="${f.episode ?? ''}"></label><button class="btn small ghost" onclick="manualAssign(${fileId})">手工创建并匹配</button></div>
+      <div class="muted" style="margin-bottom:10px">源站搜索不到时，可按上方片名、年份和类型手工创建；电影季集留空</div>
+      <div id="assign-results"><div class="empty">可修改片名后搜索，选择正确结果</div></div>
+    </div>
+  </div></div>`;
+  document.body.classList.add('modal-open');
+  document.getElementById('directory-mask').onclick = e => { if (e.target === e.currentTarget) closeDirectoryPicker(); };
+  document.getElementById('assign-q').onkeydown = e => { if (e.key === 'Enter') searchAssign(fileId); };
+}
+
+async function searchAssign(fileId) {
+  const source = document.getElementById('assign-source').value;
+  const query = document.getElementById('assign-q').value.trim();
+  if (!query) return flash('请输入片名', true);
+  const box = document.getElementById('assign-results');
+  box.innerHTML = '<div class="empty">正在搜索…</div>';
+  try {
+    const data = await api(`/api/scrape/search?source=${source}&q=${encodeURIComponent(query)}`);
+    assignSearchHits = data.items;
+    box.innerHTML = data.items.length ? data.items.map((hit, i) => `<div class="result-item"><img src="${esc(hit.poster_url)}" onerror="this.style.visibility='hidden'" alt=""><div><h3>${esc(hit.title)} <span class="muted">${esc(hit.original_title)}</span></h3><div class="muted">${hit.year ?? ''} ${hit.rating != null ? '· ★ ' + hit.rating : ''}</div><p>${esc((hit.summary || '').slice(0, 140))}</p><button class="btn small" onclick="assignFile(${fileId}, ${i})">选择此作品</button></div></div>`).join('') : '<div class="empty">没有找到相关作品</div>';
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+async function assignFile(fileId, hitIndex) {
+  const hit = assignSearchHits[hitIndex];
+  if (!hit) return;
+  try {
+    const result = await api(`/api/files/${fileId}/assign`, { method: 'POST', body: {
+      source: hit.source, external_id: hit.external_id, type: document.getElementById('assign-type').value,
+      season: Number(document.getElementById('assign-season').value) || null,
+      episode: Number(document.getElementById('assign-episode').value) || null,
+    } });
+    closeDirectoryPicker();
+    flash(`已调整为《${result.work_title}》`);
+    renderFiles();
+  } catch (e) { flash(e.message, true); }
+}
+
+async function manualAssign(fileId) {
+  const title = document.getElementById('assign-q').value.trim();
+  if (!title) return flash('请输入正确片名', true);
+  try {
+    const result = await api(`/api/files/${fileId}/manual-assign`, { method: 'POST', body: {
+      title, year: Number(document.getElementById('assign-year').value) || null,
+      type: document.getElementById('assign-type').value,
+      season: Number(document.getElementById('assign-season').value) || null,
+      episode: Number(document.getElementById('assign-episode').value) || null,
+    } });
+    closeDirectoryPicker();
+    flash(`已手工匹配为《${result.work_title}》`);
+    renderFiles();
+  } catch (e) { flash(e.message, true); }
+}
+
 async function renderStats() {
   const s = await api('/api/stats');
   const maxYear = Math.max(1, ...s.by_year.map(r => r.c));
@@ -610,6 +703,7 @@ function route() {
   else if (seg[0] === 'work' && seg[1]) { setActiveNav(''); task = renderWork(Number(seg[1])); }
   else if (seg[0] === 'edit' && seg[1]) { setActiveNav(''); task = renderEdit(Number(seg[1])); }
   else if (seg[0] === 'add') { setActiveNav(''); task = renderAdd(); }
+  else if (seg[0] === 'files') { setActiveNav(''); task = renderFiles(); }
   else if (seg[0] === 'stats') { setActiveNav(''); task = renderStats(); }
   else if (seg[0] === 'settings') { setActiveNav(''); task = renderSettings(); }
   else if (seg[0] === 'scan') { openDirectoryPicker(); return; }

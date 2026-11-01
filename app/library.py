@@ -11,12 +11,17 @@ VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".ts", ".m4v", ".w
 
 TECH_WORDS = (
     r"1080p|1080i|720p|2160p|480p|576p|4k|8k|uhd|hdr10\+?|hdr|dv|hd|sd|bd|"
-    r"brrip|bdrip|blu-?ray|web-?dl|webrip|hdtv|dvdrip|dvd|remux|hdrip|tvrip|"
+    r"brrip|bdrip|blu-?ray|web(?:-?dl)?|webrip|hdtv|dvdrip|dvd|remux|hdrip|tvrip|"
     r"x26[45]|h\.?26[45]|hevc|av1|vc-?1|xvid|divx|avc|10bit|8bit|yuv420p10|"
-    r"aac|ac3|dts|flac|truehd|atmos|ddp?[257]\.?\d*|mp3|opus|"
-    r"complete|proper|repack|extended|unrated|limited|theatrical|imax|"
-    r"chs|cht|big5|eng|ita|简繁|简体|繁体|中英字幕|双语|内嵌|内封|外挂|特效字幕"
+    r"aac|ac3|dts(?:-hd)?(?:\.ma)?|lpcm|pcm|flac|truehd|atmos|ddp?[257]\.?\d*|mp3|opus|"
+    r"\d+audio|audio|complete|proper|repack|extended|unrated|limited|theatrical|imax|"
+    r"chs|cht|big5|eng|ita|简繁|简体|繁体|中英字幕|中文字幕|中英双字|中字|双字|双语|国英双语|"
+    r"内嵌|内封|外挂|特效字幕|老片修复版|修复版"
 )
+GENERIC_DIR_NAMES = {
+    "电影", "电视剧", "影视", "视频", "剧集", "动漫", "纪录片", "合集",
+    "movie", "movies", "tv", "tvshow", "tvshows", "series", "video", "videos", "media",
+}
 TECH_RE = re.compile(r"(?<![0-9a-z])(?:" + TECH_WORDS + r")(?![0-9a-z])", re.I)
 
 
@@ -43,10 +48,12 @@ def _normalize(s: str) -> str:
 
 def _clean_title(value: str, remove_leading_group: bool = True) -> str:
     value = unicodedata.normalize("NFKC", value)
+    value = re.sub(r"(?i)\b(?:lpcm|pcm|flac|dts(?:-hd)?(?:\.ma)?|ddp?[257])[ .]?\d(?:\.\d)?", " ", value)
+    value = re.sub(r"中英双字|中英字幕|中文字幕|国英双语", " ", value)
     value = re.sub(r"[._]+", " ", value)
     value = re.sub(r"(?i)\b(?:www\.)?[a-z0-9-]+\.(?:com|net|org|cc|tv|me)\b", " ", value)
 
-    brackets = list(re.finditer(r"[\[\(【]([^\]\)】]*)[\]\)】]", value))
+    brackets = list(re.finditer(r"[\[\(【《]([^\]\)】》]*)[\]\)】》]", value))
     for i, match in reversed(list(enumerate(brackets))):
         content = match.group(1).strip()
         remainder = TECH_RE.sub(" ", value[match.end():])
@@ -58,10 +65,27 @@ def _clean_title(value: str, remove_leading_group: bool = True) -> str:
             value = value[:match.start()] + " " + content + " " + value[match.end():]
 
     value = TECH_RE.sub(" ", value)
+    value = re.sub(r"(?<!\d)[1257]\.[01](?!\d)", " ", value)
     value = re.sub(r"(?<![0-9a-z])(?:ws|fs)(?![0-9a-z])", " ", value, flags=re.I)
     value = re.sub(r"\s*[-–—_]+\s*", " ", value)
     value = re.sub(r"\s+", " ", value).strip(" -–—._")
     return value
+
+
+def _query_variants(title: str) -> list[str]:
+    if not title or title.isdigit():
+        return []
+    variants = [title]
+    words = title.split()
+    for cut in range(1, min(3, len(words) - 1) + 1):
+        candidate = " ".join(words[:-cut]).strip()
+        if len(normalize(candidate)) >= 2:
+            variants.append(candidate)
+    without_year = re.sub(r"(?<!\d)(?:19|20)\d{2}(?!\d)", "", title)
+    without_year = re.sub(r"\s+", " ", without_year).strip()
+    if without_year and without_year != title:
+        variants.append(without_year)
+    return list(dict.fromkeys(variants))
 
 
 def parse_path(path: str | Path, root: str | Path | None = None) -> ParsedFile:
@@ -113,9 +137,7 @@ def parse_path(path: str | Path, root: str | Path | None = None) -> ParsedFile:
         season = 1
 
     title = _clean_title(working)
-    queries = []
-    if title and not title.isdigit():
-        queries.append(title)
+    queries = _query_variants(title)
 
     try:
         root_path = Path(root).resolve() if root else None
@@ -132,8 +154,9 @@ def parse_path(path: str | Path, root: str | Path | None = None) -> ParsedFile:
         cleaned = _clean_title(parent.name)
         cleaned = re.sub(r"(?i)^(?:season|s)\s*\d{1,3}$", "", cleaned).strip()
         cleaned = re.sub(r"^第\s*\d{1,3}\s*季$", "", cleaned).strip()
-        if cleaned and not cleaned.isdigit() and normalize(cleaned) != normalize(title):
-            queries.append(cleaned)
+        if (cleaned and not cleaned.isdigit() and normalize(cleaned) not in GENERIC_DIR_NAMES
+                and normalize(cleaned) != normalize(title)):
+            queries.extend(_query_variants(cleaned))
             if not title or title.isdigit() or len(normalize(title)) < 2:
                 title = cleaned
 

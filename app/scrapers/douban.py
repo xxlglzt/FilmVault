@@ -108,6 +108,7 @@ def search(query: str, limit: int = 12) -> list[WorkMetadata]:
             external_id=str(item["id"]),
             type="movie",  # suggest 接口不区分电影/电视剧，导入时由用户指定
             title=re.sub(r"\s*\(豆瓣\)\s*$", "", item.get("title", "")),
+            search_alias=query,
             year=item.get("year") or None,
             poster_url=_large_poster(item.get("img", "")),
             douban_id=str(item["id"]),
@@ -139,7 +140,7 @@ def _web_search(query: str, limit: int) -> list[WorkMetadata]:
         results.append(WorkMetadata(
             source="douban", external_id=id_match.group(1),
             type="tv" if re.search(r"电视剧|剧集", block[:1500]) else "movie",
-            title=title, original_title=query,
+            title=title, search_alias=query,
             year=int(year_match.group(1)) if year_match else None,
             summary=clean(summary_match.group(1)) if summary_match else "",
             poster_url=_large_poster(html_lib.unescape(poster_match.group(1))) if poster_match else "",

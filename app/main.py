@@ -544,8 +544,10 @@ def _title_score(query: str, title: str) -> float:
 
 
 def _hit_score(pf: library.ParsedFile, hit: WorkMetadata) -> float:
-    score = max((_title_score(q, title) for q in pf.queries
-                 for title in (hit.title, hit.original_title) if title), default=0)
+    actual_score = max((_title_score(q, title) for q in pf.queries
+                        for title in (hit.title, hit.original_title) if title), default=0)
+    alias_score = max((_title_score(q, hit.search_alias) for q in pf.queries), default=0)
+    score = max(actual_score, min(alias_score, 82))
     try:
         hit_year = int(hit.year) if hit.year else None
     except (TypeError, ValueError):
@@ -605,7 +607,7 @@ def _resolve_online(conn: sqlite3.Connection, pf: library.ParsedFile) -> tuple[i
             break
     ranked = sorted(candidates.values(), key=lambda item: item[0], reverse=True)
     for score, hit in ranked[:5]:
-        if score < 68:
+        if score < 75:
             continue
         work_type = pf.work_type or hit.type
         if hit.source == "douban" and not pf.work_type:
@@ -740,6 +742,118 @@ def browse_directories(path: str = "") -> dict:
     items.sort(key=lambda item: item["name"].casefold())
     parent = str(current.parent) if current.parent != current else ""
     return {"current": str(current), "parent": parent, "items": items}
+
+
+def _parse_existing_path(path: str) -> library.ParsedFile:
+    folders = json.loads(get_setting("media_folders") or "[]")
+    root = None
+    for folder in sorted(folders, key=len, reverse=True):
+        try:
+            if Path(path).is_relative_to(folder):
+                root = folder
+                break
+        except (OSError, ValueError):
+            continue
+    return library.parse_path(path, root)
+
+
+def _file_details(file_id: int) -> dict:
+    row = db.get_conn().execute(
+        "SELECT f.*,w.title AS work_title,w.year AS work_year,w.type AS work_type FROM files f "
+        "LEFT JOIN works w ON w.id=f.work_id WHERE f.id=?", (file_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "文件不存在")
+    parsed = _parse_existing_path(row["path"])
+    return {
+        "id": row["id"], "path": row["path"], "size": row["size"],
+        "work_id": row["work_id"], "work_title": row["work_title"],
+        "work_year": row["work_year"], "work_type": row["work_type"],
+        "episode_id": row["episode_id"], "progress_seconds": row["progress_seconds"],
+        "duration_seconds": row["duration_seconds"], "watched": row["watched"],
+        "parsed_title": parsed.title, "year": parsed.year, "season": parsed.season,
+        "episode": parsed.episode, "queries": parsed.queries,
+    }
+
+
+@app.get("/api/files")
+def list_files() -> dict:
+    ids = [row["id"] for row in db.get_conn().execute("SELECT id FROM files ORDER BY path")]
+    items = [_file_details(file_id) for file_id in ids]
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/files/{file_id}/reidentify")
+def reidentify_file(file_id: int) -> dict:
+    conn = db.get_conn()
+    row = conn.execute("SELECT path FROM files WHERE id=?", (file_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "文件不存在")
+    parsed = _parse_existing_path(row["path"])
+    work_id = _local_match(conn, parsed)
+    created = False
+    error = ""
+    if not work_id:
+        work_id, created, error = _resolve_online(conn, parsed)
+    if not work_id:
+        raise HTTPException(422, error or "无法识别此文件")
+    episode_id = _ensure_episode_id(conn, work_id, parsed.season, parsed.episode)
+    _link_file(conn, parsed.path, parsed.size, work_id, episode_id)
+    conn.commit()
+    result = _file_details(file_id)
+    result["created"] = created
+    return result
+
+
+class FileAssignIn(BaseModel):
+    source: str
+    external_id: str
+    type: str = Field(pattern="^(movie|tv)$")
+    season: int | None = None
+    episode: int | None = None
+
+
+@app.post("/api/files/{file_id}/assign")
+def assign_file(file_id: int, body: FileAssignIn) -> dict:
+    conn = db.get_conn()
+    row = conn.execute("SELECT path,size FROM files WHERE id=?", (file_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "文件不存在")
+    md = scrape_fetch(body.source, body.external_id, body.type, get_setting("tmdb_api_key"))
+    work_id = _find_existing(conn, md) or _existing_by_title(conn, md)
+    if work_id is None:
+        work_id = _insert_work(conn, md)
+        conn.commit()
+        if md.poster_url:
+            _cache_poster(work_id, md.poster_url)
+    episode_id = _ensure_episode_id(conn, work_id, body.season, body.episode)
+    _link_file(conn, row["path"], row["size"], work_id, episode_id)
+    conn.commit()
+    return _file_details(file_id)
+
+
+class ManualAssignIn(BaseModel):
+    title: str = Field(min_length=1)
+    year: int | None = None
+    type: str = Field(pattern="^(movie|tv)$")
+    season: int | None = None
+    episode: int | None = None
+
+
+@app.post("/api/files/{file_id}/manual-assign")
+def manual_assign_file(file_id: int, body: ManualAssignIn) -> dict:
+    conn = db.get_conn()
+    row = conn.execute("SELECT path,size FROM files WHERE id=?", (file_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "文件不存在")
+    md = WorkMetadata(source="manual", external_id="", type=body.type,
+                      title=body.title.strip(), year=body.year)
+    work_id = _existing_by_title(conn, md)
+    if work_id is None:
+        work_id = _insert_work(conn, md)
+    episode_id = _ensure_episode_id(conn, work_id, body.season, body.episode)
+    _link_file(conn, row["path"], row["size"], work_id, episode_id)
+    conn.commit()
+    return _file_details(file_id)
 
 
 class LinkIn(BaseModel):
