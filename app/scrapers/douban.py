@@ -14,6 +14,7 @@ import html as html_lib
 import json
 import re
 import threading
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from .base import ScrapeError, WorkMetadata
@@ -55,8 +56,7 @@ def _solve_pow(cha: str, difficulty: int = 4) -> int:
             return nonce
 
 
-def _get(url: str) -> str:
-    """GET 页面，自动多轮处理豆瓣的 proof-of-work 挑战链。"""
+def _get_legacy(url: str) -> str:
     s = _session()
     resp = s.get(url)
     if getattr(resp, "status_code", 200) != 200:
@@ -65,7 +65,6 @@ def _get(url: str) -> str:
     for _ in range(5):
         if 'name="sol"' not in html:
             return html
-        # 解析挑战表单：action + 全部隐藏字段
         from urllib.parse import urljoin
         m_form = re.search(r'<form[^>]*action="([^"]*)"[^>]*>', html)
         action = urljoin(resp.url, m_form.group(1)) if m_form else resp.url
@@ -81,6 +80,61 @@ def _get(url: str) -> str:
     raise ScrapeError("豆瓣反爬挑战连续多轮未通过，请稍后重试")
 
 
+_browser_lock = threading.Lock()
+
+
+def _system_browser() -> Path | None:
+    candidates = (
+        "C:/Program Files/Google/Chrome/Application/chrome.exe",
+        "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+        "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+        "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    )
+    return next((Path(path) for path in candidates if Path(path).is_file()), None)
+
+
+def _scrapling_get(url: str) -> str:
+    try:
+        from scrapling import StealthyFetcher
+    except ImportError as exc:
+        raise ScrapeError("未安装 Scrapling 浏览器抓取扩展") from exc
+    profile = Path(__file__).resolve().parents[2] / "data" / "scrapling-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    browser = _system_browser()
+    browser_options = {"executable_path": str(browser), "real_chrome": True} if browser else {}
+    try:
+        with _browser_lock:
+            resp = StealthyFetcher.fetch(
+                url, headless=True, disable_resources=True, network_idle=False,
+                load_dom=True, wait=3000, timeout=60000,
+                user_data_dir=str(profile), **browser_options,
+            )
+        html = resp.body.decode("utf-8", "ignore")
+        if resp.status != 200:
+            raise ScrapeError(f"Scrapling 返回 HTTP {resp.status}")
+        if 'name="sol"' in html:
+            raise ScrapeError("Scrapling 未能通过豆瓣验证")
+        if not html:
+            raise ScrapeError("Scrapling 返回空页面")
+        return html
+    except ScrapeError:
+        raise
+    except Exception as exc:
+        raise ScrapeError(f"Scrapling 浏览器抓取失败：{exc}") from exc
+
+
+def _get(url: str) -> str:
+    try:
+        return _get_legacy(url)
+    except ScrapeError as legacy_error:
+        try:
+            return _scrapling_get(url)
+        except ScrapeError as browser_error:
+            raise ScrapeError(f"{legacy_error}；{browser_error}") from browser_error
+
+
 def _large_poster(url: str) -> str:
     return (url.replace("/s_ratio_poster/", "/l_ratio_poster/")
             .replace("/view/photo/s/", "/view/photo/l/")
@@ -88,17 +142,13 @@ def _large_poster(url: str) -> str:
 
 
 def search(query: str, limit: int = 12) -> list[WorkMetadata]:
-    s = _session()
+    items = []
     try:
-        resp = s.get(SEARCH_URL, params={"q": query})
-    except Exception as e:
-        raise ScrapeError(f"连接豆瓣失败（可能需要代理）：{type(e).__name__}: {e}") from e
-    if getattr(resp, "status_code", 200) != 200:
-        raise ScrapeError(f"豆瓣搜索返回 HTTP {resp.status_code}（可能被反爬拦截）")
-    try:
-        items = json.loads(_text(resp))
-    except (json.JSONDecodeError, ValueError):
-        raise ScrapeError("豆瓣搜索返回格式异常（疑似被拦截），请稍后重试或换 TMDB 源")
+        resp = _session().get(SEARCH_URL, params={"q": query})
+        if getattr(resp, "status_code", 200) == 200:
+            items = json.loads(_text(resp))
+    except Exception:
+        items = []
     results = []
     for item in items:
         if not isinstance(item, dict) or "id" not in item:

@@ -19,6 +19,7 @@
 
 ```bash
 pip install -r requirements.txt
+scrapling install  # 可选：没有 Chrome/Edge 时安装反爬回退浏览器
 python run.py
 ```
 

@@ -2,4 +2,5 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 httpx>=0.27
 pydantic>=2
-curl_cffi>=0.7  # 豆瓣刮削的浏览器指纹模拟，可选但强烈建议
+curl_cffi>=0.16.1  # 豆瓣刮削的浏览器指纹模拟，可选但强烈建议
+scrapling[fetchers]>=0.5  # 反爬页面的浏览器回退
