@@ -11,9 +11,9 @@ VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".ts", ".m4v", ".w
 
 TECH_WORDS = (
     r"1080p|1080i|720p|2160p|480p|576p|4k|8k|uhd|hdr10\+?|hdr|dv|hd|sd|bd|"
-    r"brrip|bdrip|blu-?ray|web(?:-?dl)?|webrip|hdtv|dvdrip|dvd|remux|hdrip|tvrip|"
-    r"x26[45]|h\.?26[45]|hevc|av1|vc-?1|xvid|divx|avc|10bit|8bit|yuv420p10|"
-    r"aac|ac3|dts(?:-hd)?(?:\.ma)?|lpcm|pcm|flac|truehd|atmos|ddp?[257]\.?\d*|mp3|opus|"
+    r"brrip|bdrip|blu-?ray|web(?:-?dl)?|webrip|hdtv|dvdrip|dvd|remux|hdrip|tvrip|amzn|itunes|"
+    r"x26[45]|h[ .]?26[45]|hevc|av1|vc-?1|xvid|divx|avc|10-?bit|8-?bit|yuv420p10|"
+    r"aac|ac3|dts(?:-hd)?(?:\.ma)?|lpcm|pcm|flac|truehd|atmos|ddp?[257]\.?\d*|mp3|opus|dolby|digital|"
     r"\d+audio|audio|complete|proper|repack|extended|unrated|limited|theatrical|imax|"
     r"chs|cht|big5|eng|ita|简繁|简体|繁体|中英字幕|中文字幕|中英双字|中字|双字|双语|国英双语|"
     r"内嵌|内封|外挂|特效字幕|老片修复版|修复版"
@@ -48,7 +48,7 @@ def _normalize(s: str) -> str:
 
 def _clean_title(value: str, remove_leading_group: bool = True) -> str:
     value = unicodedata.normalize("NFKC", value)
-    value = re.sub(r"(?i)\b(?:lpcm|pcm|flac|dts(?:-hd)?(?:\.ma)?|ddp?[257])[ .]?\d(?:\.\d)?", " ", value)
+    value = re.sub(r"(?i)\b(?:lpcm|pcm|flac|dolby[ ]digital|dts(?:-hd)?(?:\.ma)?|ddp?[257])[ .]?\d(?:\.\d)?", " ", value)
     value = re.sub(r"中英双字|中英字幕|中文字幕|国英双语", " ", value)
     value = re.sub(r"[._]+", " ", value)
     value = re.sub(r"(?i)\b(?:www\.)?[a-z0-9-]+\.(?:com|net|org|cc|tv|me)\b", " ", value)

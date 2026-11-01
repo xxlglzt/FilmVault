@@ -42,6 +42,7 @@ def get_setting(key: str) -> str:
 @app.on_event("startup")
 def startup() -> None:
     db.init_db()
+    threading.Thread(target=_watch_libraries, daemon=True).start()
 
 
 @app.exception_handler(ScrapeError)
@@ -53,14 +54,14 @@ def _touch(conn: sqlite3.Connection, work_id: int) -> None:
     conn.execute("UPDATE works SET updated_at=datetime('now','localtime') WHERE id=?", (work_id,))
 
 
-def _insert_work(conn: sqlite3.Connection, md: WorkMetadata) -> int:
+def _insert_work(conn: sqlite3.Connection, md: WorkMetadata, origin: str = "auto") -> int:
     cur = conn.execute(
         """INSERT INTO works (type,title,original_title,year,region,genres,directors,cast,
-                              summary,douban_id,tmdb_id,imdb_id,douban_rating)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              summary,douban_id,tmdb_id,imdb_id,douban_rating,origin)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (md.type, md.title, md.original_title, md.year, md.region,
          db.jdump(md.genres), db.jdump(md.directors), db.jdump(md.cast),
-         md.summary, md.douban_id, md.tmdb_id, md.imdb_id, md.rating),
+         md.summary, md.douban_id, md.tmdb_id, md.imdb_id, md.rating, origin),
     )
     work_id = cur.lastrowid
     for season in md.seasons:
@@ -235,7 +236,7 @@ def create_work(w: WorkIn) -> dict:
                       genres=w.genres, directors=w.directors, cast=w.cast, summary=w.summary,
                       rating=w.douban_rating, tmdb_id=w.tmdb_id,
                       douban_id=w.douban_id, imdb_id=w.imdb_id)
-    work_id = _insert_work(conn, md)
+    work_id = _insert_work(conn, md, origin="manual")
     conn.execute("UPDATE works SET status=?, my_rating=? WHERE id=?",
                  (w.status if w.status in STATUSES else "none", w.my_rating, work_id))
     conn.commit()
@@ -425,7 +426,7 @@ def scrape_import(body: ImportIn) -> dict:
     existing = _find_existing(conn, md)
     if existing:
         return {"id": existing, "duplicated": True}
-    work_id = _insert_work(conn, md)
+    work_id = _insert_work(conn, md, origin="manual")
     conn.commit()
     if md.poster_url:
         _cache_poster(work_id, md.poster_url)
@@ -554,6 +555,8 @@ def _hit_score(pf: library.ParsedFile, hit: WorkMetadata) -> float:
         hit_year = None
     if pf.year and hit_year:
         score += 12 if pf.year == hit_year else (-8 if abs(pf.year - hit_year) == 1 else -25)
+    elif pf.year:
+        score -= 10
     if pf.work_type and hit.source == "tmdb":
         score += 10 if pf.work_type == hit.type else -45
     if hit.source == "douban":
@@ -591,7 +594,12 @@ def _resolve_online(conn: sqlite3.Connection, pf: library.ParsedFile) -> tuple[i
     sources = ["douban"] + (["tmdb"] if tmdb_key else [])
     candidates: dict[tuple[str, str], tuple[float, WorkMetadata]] = {}
     errors = []
+    search_queries = []
     for query in pf.queries[:3]:
+        search_queries.append(query)
+        if pf.year:
+            search_queries.append(f"{query} {pf.year}")
+    for query in search_queries:
         for source in sources:
             try:
                 hits = scrape_search(source, query, tmdb_key, limit=6)
@@ -632,6 +640,39 @@ def _resolve_online(conn: sqlite3.Connection, pf: library.ParsedFile) -> tuple[i
     return None, False, "搜索结果可信度不足，已跳过"
 
 
+def _path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _reconcile_scan(conn: sqlite3.Connection, folder: str, parsed: list[library.ParsedFile], job: dict) -> None:
+    current_paths = {_path_key(pf.path) for pf in parsed}
+    root = Path(folder).resolve()
+    affected_works = set()
+    for row in conn.execute("SELECT id,path,work_id FROM files"):
+        try:
+            inside = Path(row["path"]).resolve().is_relative_to(root)
+        except (OSError, ValueError):
+            inside = False
+        if inside and _path_key(row["path"]) not in current_paths:
+            affected_works.add(row["work_id"])
+            conn.execute("DELETE FROM files WHERE id=?", (row["id"],))
+            job["removed"] += 1
+    for work_id in affected_works:
+        if not work_id:
+            continue
+        row = conn.execute(
+            "SELECT w.id,w.poster_file FROM works w WHERE w.id=? AND w.origin='auto' "
+            "AND w.my_rating IS NULL AND w.status='none' "
+            "AND NOT EXISTS(SELECT 1 FROM files f WHERE f.work_id=w.id) "
+            "AND NOT EXISTS(SELECT 1 FROM reviews r WHERE r.work_id=w.id)", (work_id,)).fetchone()
+        if row:
+            conn.execute("DELETE FROM works WHERE id=?", (work_id,))
+            if row["poster_file"]:
+                (db.POSTER_DIR / row["poster_file"]).unlink(missing_ok=True)
+            job["removed_works"] += 1
+    conn.commit()
+
+
 def _run_scan_job(job_id: str, folder: str) -> None:
     job = SCAN_JOBS[job_id]
     conn = db.get_conn()
@@ -640,10 +681,6 @@ def _run_scan_job(job_id: str, folder: str) -> None:
         parsed = library.scan_folder(folder)
         job["total"] = len(parsed)
         job["phase"] = "自动识别与入库"
-        if not parsed:
-            job["status"] = "done"
-            job["phase"] = "未发现视频文件"
-            return
         for pf in parsed:
             job["current"] = Path(pf.path).name
             if conn.execute("SELECT 1 FROM files WHERE path=?", (pf.path,)).fetchone():
@@ -669,8 +706,9 @@ def _run_scan_job(job_id: str, folder: str) -> None:
                 if work_id not in job["work_ids"]:
                     job["work_ids"].append(work_id)
             job["processed"] += 1
+        _reconcile_scan(conn, folder, parsed, job)
         job["status"] = "done"
-        job["phase"] = "扫描完成"
+        job["phase"] = "扫描完成" if parsed else "目录中没有视频，已同步移除失效记录"
         job["current"] = ""
     except Exception as exc:
         job["status"] = "error"
@@ -678,13 +716,45 @@ def _run_scan_job(job_id: str, folder: str) -> None:
         job["errors"].append({"path": folder, "reason": str(exc)})
 
 
+def _start_scan_job(folder: str) -> dict | None:
+    if any(job["status"] == "running" for job in SCAN_JOBS.values()):
+        return None
+    job_id = uuid.uuid4().hex
+    SCAN_JOBS[job_id] = {
+        "id": job_id, "status": "running", "phase": "正在扫描目录", "folder": folder,
+        "processed": 0, "total": 0, "added": 0, "updated": 0, "skipped": 0,
+        "removed": 0, "removed_works": 0, "failed": 0, "current": "", "errors": [], "work_ids": [],
+    }
+    threading.Thread(target=_run_scan_job, args=(job_id, folder), daemon=True).start()
+    return SCAN_JOBS[job_id].copy()
+
+
+def _watch_libraries() -> None:
+    signatures: dict[str, tuple] = {}
+    while True:
+        import time
+        time.sleep(30)
+        folders = json.loads(get_setting("media_folders") or "[]")
+        for folder in folders:
+            if not Path(folder).is_dir():
+                continue
+            try:
+                signature = tuple(sorted(
+                    (_path_key(pf.path), pf.size) for pf in library.scan_folder(folder)))
+            except OSError:
+                continue
+            if signatures.get(folder) == signature:
+                continue
+            job = _start_scan_job(folder)
+            if job:
+                signatures[folder] = signature
+
+
 @app.post("/api/library/scan", status_code=202)
 def scan_library(body: ScanIn) -> dict:
     root = Path(body.folder)
     if not root.is_dir():
         raise HTTPException(400, f"目录不存在：{body.folder}")
-    if any(job["status"] == "running" for job in SCAN_JOBS.values()):
-        raise HTTPException(409, "已有扫描任务进行中")
     folder = str(root.resolve())
     folders = json.loads(get_setting("media_folders") or "[]")
     if folder not in folders:
@@ -694,14 +764,10 @@ def scan_library(body: ScanIn) -> dict:
             "INSERT INTO settings (key,value) VALUES ('media_folders',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(folders),))
         conn.commit()
-    job_id = uuid.uuid4().hex
-    SCAN_JOBS[job_id] = {
-        "id": job_id, "status": "running", "phase": "正在扫描目录", "folder": folder,
-        "processed": 0, "total": 0, "added": 0, "updated": 0, "skipped": 0,
-        "failed": 0, "current": "", "errors": [], "work_ids": [],
-    }
-    threading.Thread(target=_run_scan_job, args=(job_id, folder), daemon=True).start()
-    return SCAN_JOBS[job_id].copy()
+    job = _start_scan_job(folder)
+    if not job:
+        raise HTTPException(409, "已有扫描任务进行中")
+    return job
 
 
 @app.get("/api/library/scan/{job_id}")
@@ -821,10 +887,12 @@ def assign_file(file_id: int, body: FileAssignIn) -> dict:
     md = scrape_fetch(body.source, body.external_id, body.type, get_setting("tmdb_api_key"))
     work_id = _find_existing(conn, md) or _existing_by_title(conn, md)
     if work_id is None:
-        work_id = _insert_work(conn, md)
+        work_id = _insert_work(conn, md, origin="manual")
         conn.commit()
         if md.poster_url:
             _cache_poster(work_id, md.poster_url)
+    else:
+        conn.execute("UPDATE works SET origin='manual' WHERE id=?", (work_id,))
     episode_id = _ensure_episode_id(conn, work_id, body.season, body.episode)
     _link_file(conn, row["path"], row["size"], work_id, episode_id)
     conn.commit()
@@ -849,7 +917,9 @@ def manual_assign_file(file_id: int, body: ManualAssignIn) -> dict:
                       title=body.title.strip(), year=body.year)
     work_id = _existing_by_title(conn, md)
     if work_id is None:
-        work_id = _insert_work(conn, md)
+        work_id = _insert_work(conn, md, origin="manual")
+    else:
+        conn.execute("UPDATE works SET origin='manual' WHERE id=?", (work_id,))
     episode_id = _ensure_episode_id(conn, work_id, body.season, body.episode)
     _link_file(conn, row["path"], row["size"], work_id, episode_id)
     conn.commit()

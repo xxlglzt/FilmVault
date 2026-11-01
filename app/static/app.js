@@ -593,7 +593,7 @@ function renderScanJob(job) {
   scanRoot.innerHTML = `<div class="scan-widget${scanMinimized ? ' minimized' : ''}" id="scan-widget">
     <div class="scan-head"><strong>${running ? '正在整理媒体库' : job.status === 'done' ? '媒体库已更新' : '扫描中断'}</strong><button onclick="toggleScanWidget()" title="${scanMinimized ? '展开' : '收起'}">${scanMinimized ? '□' : '—'}</button></div>
     <div class="scan-body"><div class="scan-phase"><span>${esc(job.phase)}</span><span>${job.processed}/${job.total}</span></div><div class="scan-progress"><i style="width:${pct}%"></i></div>
-      <div class="scan-current">${esc(job.current || job.folder)}</div><div class="scan-counts"><span>新增 ${job.added}</span><span>更新 ${job.updated}</span><span>已存在 ${job.skipped}</span><span>待识别 ${job.failed}</span></div>
+      <div class="scan-current">${esc(job.current || job.folder)}</div><div class="scan-counts"><span>新增 ${job.added}</span><span>更新 ${job.updated}</span><span>已存在 ${job.skipped}</span><span>移除 ${job.removed || 0}</span><span>待识别 ${job.failed}</span></div>
       ${job.errors.length ? `<details class="scan-errors"><summary>查看 ${job.errors.length} 个未识别文件</summary>${job.errors.map(item => `<div class="scan-error"><code title="${esc(item.path)}">${esc(item.path)}</code>${esc(item.reason)}</div>`).join('')}</details>` : ''}
       ${!running ? '<button class="btn small ghost" style="margin-top:13px" onclick="dismissScanJob()">关闭</button>' : ''}
     </div>
@@ -730,6 +730,13 @@ document.getElementById('more-toggle').onclick = e => {
 document.addEventListener('click', e => { if (!e.target.closest('.more-menu')) document.getElementById('more-dropdown').classList.remove('open'); });
 window.addEventListener('scroll', () => document.getElementById('topbar').classList.toggle('solid', window.scrollY > 30));
 window.addEventListener('hashchange', route);
+
+setInterval(() => {
+  const hash = location.hash.slice(1) || '/';
+  if (hash === '/' && !document.hidden && !playerRoot.innerHTML && !directoryRoot.innerHTML) {
+    renderHome().catch(() => {});
+  }
+}, 45000);
 
 const previousJob = localStorage.getItem('filmvault_scan_job');
 if (previousJob) pollScan(previousJob);

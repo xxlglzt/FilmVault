@@ -17,7 +17,7 @@ DB_PATH = DATA_DIR / "filmvault.db"
 
 _local = threading.local()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS works (
     my_rating REAL CHECK (my_rating IS NULL OR (my_rating >= 0 AND my_rating <= 10)),
     status TEXT NOT NULL DEFAULT 'none'
         CHECK (status IN ('none', 'want', 'watching', 'watched', 'on_hold', 'dropped')),
+    origin TEXT NOT NULL DEFAULT 'auto',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
@@ -144,6 +145,11 @@ def init_db() -> None:
                 "duration_seconds=COALESCE((SELECT duration_seconds FROM episodes WHERE id=files.episode_id),0), "
                 "watched=COALESCE((SELECT watched FROM episodes WHERE id=files.episode_id),0), "
                 "watched_at=(SELECT watched_at FROM episodes WHERE id=files.episode_id) WHERE episode_id IS NOT NULL")
+        if version < 3:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(works)")}
+            if "origin" not in columns:
+                conn.execute("ALTER TABLE works ADD COLUMN origin TEXT NOT NULL DEFAULT 'auto'")
+            conn.execute("UPDATE works SET origin='manual' WHERE NOT EXISTS (SELECT 1 FROM files WHERE work_id=works.id)")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
 
